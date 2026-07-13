@@ -1,4 +1,5 @@
 # PDF Hash Comparator
+## release v0.2
 
 Графічна програма на Python для порівняння двох PDF-файлів сторінка за сторінкою за допомогою perceptual hash.
 
