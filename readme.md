@@ -1,5 +1,5 @@
 # PDF Hash Comparator
-## release v0.2
+## release v0.3
 
 Графічна програма на Python для порівняння двох PDF-файлів сторінка за сторінкою за допомогою perceptual hash.
 
@@ -124,3 +124,6 @@ pdf-hash-diff/
 ```bash
 pip install -r requirements.txt
 ```
+
+
+pyinstaller --onefile --windowed --name pdf-diff-v-0_3 pdf-diff.py

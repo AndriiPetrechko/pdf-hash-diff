@@ -26,7 +26,7 @@ ZOOM_STEP = 0.25
 class PdfGridHashComparatorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("PDF diff v0.2 - Порівняння PDF за сіткою")
+        self.root.title("PDF diff v0.3")
         self.root.geometry("1450x950")
 
         self.pdf1_path = None
