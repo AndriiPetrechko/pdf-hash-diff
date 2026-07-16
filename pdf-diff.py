@@ -9,8 +9,8 @@ import imagehash
 from PIL import Image, ImageDraw, ImageTk
 
 
-GRID_ROWS = 4
-GRID_COLS = 4
+GRID_ROWS = 5
+GRID_COLS = 5
 
 BLOCK_THRESHOLD = 6
 MIN_CHANGED_BLOCKS = 1
