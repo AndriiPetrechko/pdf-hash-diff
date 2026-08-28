@@ -22,20 +22,17 @@ MIN_ZOOM = 0.25
 MAX_ZOOM = 4.0
 ZOOM_STEP = 0.25
 
+PDF_COUNT = 3
 
 class PdfGridHashComparatorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("PDF diff v0.3")
-        self.root.geometry("1450x950")
+        self.root.title("PDF diff v0.4")
+        self.root.geometry("1750x950")
 
-        self.pdf1_path = None
-        self.pdf2_path = None
-
-        self.pdf1_images = []
-        self.pdf2_images = []
-        self.pdf1_grid_hashes = []
-        self.pdf2_grid_hashes = []
+        self.pdf_paths = [None] * PDF_COUNT
+        self.pdf_images = [[] for _ in range(PDF_COUNT)]
+        self.pdf_grid_hashes = [[] for _ in range(PDF_COUNT)]
 
         self.changed_blocks_by_page = {}
         self.results = []
@@ -46,16 +43,22 @@ class PdfGridHashComparatorApp:
         self.show_grid = tk.BooleanVar(value=True)
         self.sync_scroll = tk.BooleanVar(value=True)
 
-        self.preview_img1 = None
-        self.preview_img2 = None
+        self.preview_imgs = [None] * PDF_COUNT
+        self.canvases = []
+        self.canvas_image_ids = []
 
         self._syncing_scroll = False
         self._drag_start = {}
+
+        self.cancel_event = threading.Event()
+        self.compare_thread = None
+        self.is_comparing = False
 
         self.build_ui()
 
     def build_ui(self):
         self.build_top_bar()
+        self.build_file_labels()
         self.build_view_controls()
         self.build_results_table()
         self.build_preview_area()
@@ -64,39 +67,51 @@ class PdfGridHashComparatorApp:
         frame = tk.Frame(self.root)
         frame.pack(fill="x", padx=10, pady=(10, 5))
 
-        tk.Button(
+        self.select_button = tk.Button(
             frame,
-            text="Вибрати PDF 1",
-            command=self.select_pdf1
-        ).pack(side="left", padx=5)
+            text="Вибрати PDF (3 файли)",
+            command=self.select_pdfs,
+        )
+        self.select_button.pack(side="left", padx=5)
 
-        tk.Button(
-            frame,
-            text="Вибрати PDF 2",
-            command=self.select_pdf2
-        ).pack(side="left", padx=5)
-
-        tk.Button(
+        self.compare_button = tk.Button(
             frame,
             text="Порівняти",
-            command=self.compare
-        ).pack(side="left", padx=5)
+            command=self.compare,
+        )
+        self.compare_button.pack(side="left", padx=5)
+
+        self.cancel_button = tk.Button(
+            frame,
+            text="Скасувати",
+            command=self.cancel_compare,
+            state="disabled",
+        )
+        self.cancel_button.pack(side="left", padx=5)
 
         self.progress = ttk.Progressbar(
             frame,
-            length=260,
-            mode="determinate"
+            length=320,
+            mode="determinate",
         )
         self.progress.pack(side="left", padx=10)
 
         self.status_label = tk.Label(frame, text="Готово")
         self.status_label.pack(side="left", padx=10)
 
-        self.pdf1_label = tk.Label(frame, text="PDF 1 не вибрано")
-        self.pdf1_label.pack(side="left", padx=15)
+    def build_file_labels(self):
+        frame = tk.Frame(self.root)
+        frame.pack(fill="x", padx=10, pady=(0, 5))
 
-        self.pdf2_label = tk.Label(frame, text="PDF 2 не вибрано")
-        self.pdf2_label.pack(side="left", padx=15)
+        self.pdf_labels = []
+        for index in range(PDF_COUNT):
+            label = tk.Label(
+                frame,
+                text=f"PDF {index + 1}: не вибрано",
+                anchor="w",
+            )
+            label.pack(side="left", fill="x", expand=True, padx=8)
+            self.pdf_labels.append(label)
 
     def build_view_controls(self):
         frame = tk.Frame(self.root)
@@ -108,7 +123,7 @@ class PdfGridHashComparatorApp:
             frame,
             text="−",
             width=3,
-            command=self.zoom_out
+            command=self.zoom_out,
         ).pack(side="left", padx=2)
 
         self.zoom_label = tk.Label(frame, text="100%", width=7)
@@ -118,37 +133,37 @@ class PdfGridHashComparatorApp:
             frame,
             text="+",
             width=3,
-            command=self.zoom_in
+            command=self.zoom_in,
         ).pack(side="left", padx=2)
 
         tk.Button(
             frame,
             text="Fit page",
-            command=self.fit_page
+            command=self.fit_page,
         ).pack(side="left", padx=(8, 3))
 
         tk.Button(
             frame,
             text="Fit width",
-            command=self.fit_width
+            command=self.fit_width,
         ).pack(side="left", padx=3)
 
         ttk.Checkbutton(
             frame,
             text="Синхронна прокрутка",
-            variable=self.sync_scroll
+            variable=self.sync_scroll,
         ).pack(side="left", padx=(15, 5))
 
         ttk.Checkbutton(
             frame,
             text="Показувати сітку",
             variable=self.show_grid,
-            command=self.refresh_preview
+            command=self.refresh_preview,
         ).pack(side="left", padx=5)
 
         tk.Label(
             frame,
-            text="Ctrl + колесо — масштаб, ліва кнопка миші — перетягування"
+            text="Ctrl + колесо — масштаб, ліва кнопка миші — перетягування",
         ).pack(side="left", padx=20)
 
     def build_results_table(self):
@@ -161,14 +176,14 @@ class PdfGridHashComparatorApp:
             "changed_blocks",
             "max_distance",
             "total_distance",
-            "blocks"
+            "blocks",
         )
 
         self.tree = ttk.Treeview(
             frame,
             columns=columns,
             show="headings",
-            height=11
+            height=11,
         )
 
         headings = {
@@ -177,16 +192,16 @@ class PdfGridHashComparatorApp:
             "changed_blocks": "Змінено блоків",
             "max_distance": "Max distance",
             "total_distance": "Сума distance",
-            "blocks": "Блоки",
+            "blocks": "Блоки / пари",
         }
 
         widths = {
             "page": 80,
-            "status": 180,
+            "status": 240,
             "changed_blocks": 130,
             "max_distance": 120,
             "total_distance": 120,
-            "blocks": 500,
+            "blocks": 800,
         }
 
         for column in columns:
@@ -194,7 +209,7 @@ class PdfGridHashComparatorApp:
             self.tree.column(
                 column,
                 width=widths[column],
-                anchor="center" if column != "blocks" else "w"
+                anchor="center" if column != "blocks" else "w",
             )
 
         self.tree.tag_configure("ok", background="#d9fdd3")
@@ -204,7 +219,7 @@ class PdfGridHashComparatorApp:
         scrollbar = ttk.Scrollbar(
             frame,
             orient="vertical",
-            command=self.tree.yview
+            command=self.tree.yview,
         )
         self.tree.configure(yscrollcommand=scrollbar.set)
 
@@ -217,14 +232,18 @@ class PdfGridHashComparatorApp:
         frame = tk.Frame(self.root)
         frame.pack(fill="both", expand=True, padx=10, pady=(5, 10))
 
-        left = tk.LabelFrame(frame, text="PDF 1")
-        left.pack(side="left", fill="both", expand=True, padx=(0, 5))
+        for index in range(PDF_COUNT):
+            panel = tk.LabelFrame(frame, text=f"PDF {index + 1}")
+            panel.pack(
+                side="left",
+                fill="both",
+                expand=True,
+                padx=(0 if index == 0 else 5, 0 if index == PDF_COUNT - 1 else 5),
+            )
 
-        right = tk.LabelFrame(frame, text="PDF 2")
-        right.pack(side="left", fill="both", expand=True, padx=(5, 0))
-
-        self.canvas1, self.canvas1_image_id = self.create_canvas(left, 1)
-        self.canvas2, self.canvas2_image_id = self.create_canvas(right, 2)
+            canvas, image_id = self.create_canvas(panel, index)
+            self.canvases.append(canvas)
+            self.canvas_image_ids.append(image_id)
 
     def create_canvas(self, parent, side):
         container = tk.Frame(parent)
@@ -233,7 +252,7 @@ class PdfGridHashComparatorApp:
         canvas = tk.Canvas(
             container,
             background="#2b2b2b",
-            highlightthickness=0
+            highlightthickness=0,
         )
 
         h_scroll = ttk.Scrollbar(container, orient="horizontal")
@@ -248,16 +267,12 @@ class PdfGridHashComparatorApp:
 
         image_id = canvas.create_image(0, 0, anchor="nw")
 
-        h_scroll.configure(
-            command=lambda *args: self.scroll_x(side, *args)
-        )
-        v_scroll.configure(
-            command=lambda *args: self.scroll_y(side, *args)
-        )
+        h_scroll.configure(command=lambda *args: self.scroll_x(side, *args))
+        v_scroll.configure(command=lambda *args: self.scroll_y(side, *args))
 
         canvas.configure(
             xscrollcommand=h_scroll.set,
-            yscrollcommand=v_scroll.set
+            yscrollcommand=v_scroll.set,
         )
 
         canvas.bind("<Control-MouseWheel>", self.on_ctrl_mousewheel)
@@ -266,169 +281,147 @@ class PdfGridHashComparatorApp:
 
         canvas.bind(
             "<ButtonPress-1>",
-            lambda event: self.start_drag(side, event)
+            lambda event: self.start_drag(side, event),
         )
         canvas.bind(
             "<B1-Motion>",
-            lambda event: self.drag_canvas(side, event)
+            lambda event: self.drag_canvas(side, event),
         )
 
         return canvas, image_id
 
-    def select_pdf1(self):
-        path = filedialog.askopenfilename(
-            title="Вибрати PDF 1",
-            filetypes=[("PDF files", "*.pdf")]
+    def select_pdfs(self):
+        paths = filedialog.askopenfilenames(
+            title="Вибрати рівно 3 PDF",
+            filetypes=[("PDF files", "*.pdf")],
         )
 
-        if path:
-            self.pdf1_path = path
-            self.pdf1_label.config(text=os.path.basename(path))
+        if not paths:
+            return
 
-    def select_pdf2(self):
-        path = filedialog.askopenfilename(
-            title="Вибрати PDF 2",
-            filetypes=[("PDF files", "*.pdf")]
-        )
-
-        if path:
-            self.pdf2_path = path
-            self.pdf2_label.config(text=os.path.basename(path))
-
-    def compare(self):
-        if not self.pdf1_path or not self.pdf2_path:
+        if len(paths) != PDF_COUNT:
             messagebox.showwarning(
                 "Помилка",
-                "Вибери обидва PDF файли"
+                "Потрібно вибрати рівно три PDF файли за один раз.",
             )
+            return
+
+        self.pdf_paths = list(paths)
+
+        for index, path in enumerate(self.pdf_paths):
+            self.pdf_labels[index].config(
+                text=f"PDF {index + 1}: {os.path.basename(path)}"
+            )
+
+    def compare(self):
+        if any(not path for path in self.pdf_paths):
+            messagebox.showwarning(
+                "Помилка",
+                "Спочатку вибери три PDF файли.",
+            )
+            return
+
+        if self.is_comparing:
             return
 
         self.clear_table()
         self.progress["value"] = 0
         self.status_label.config(text="Підготовка...")
 
-        thread = threading.Thread(
+        self.cancel_event.clear()
+        self.set_comparing_state(True)
+
+        self.compare_thread = threading.Thread(
             target=self.compare_worker,
-            daemon=True
+            daemon=True,
         )
-        thread.start()
+        self.compare_thread.start()
+
+    def cancel_compare(self):
+        if not self.is_comparing:
+            return
+
+        self.cancel_event.set()
+        self.cancel_button.config(state="disabled")
+        self.status_label.config(text="Скасування...")
+
+    def set_comparing_state(self, comparing):
+        self.is_comparing = comparing
+        self.select_button.config(state="disabled" if comparing else "normal")
+        self.compare_button.config(state="disabled" if comparing else "normal")
+        self.cancel_button.config(state="normal" if comparing else "disabled")
 
     def compare_worker(self):
-        doc1 = None
-        doc2 = None
+        docs = [None] * PDF_COUNT
 
         try:
-            doc1 = fitz.open(self.pdf1_path)
-            doc2 = fitz.open(self.pdf2_path)
+            for index, path in enumerate(self.pdf_paths):
+                if self.cancel_event.is_set():
+                    self.finish_cancelled()
+                    return
+                docs[index] = fitz.open(path)
 
-            total_pages = len(doc1) + len(doc2)
-            processed_pages = 0
+            total_render_pages = sum(len(doc) for doc in docs)
+            max_pages = max(len(doc) for doc in docs)
+            total_steps = total_render_pages + max_pages
+            processed_steps = 0
 
-            self.pdf1_images = []
-            self.pdf2_images = []
-            self.pdf1_grid_hashes = []
-            self.pdf2_grid_hashes = []
+            self.pdf_images = [[] for _ in range(PDF_COUNT)]
+            self.pdf_grid_hashes = [[] for _ in range(PDF_COUNT)]
             self.changed_blocks_by_page = {}
 
             self.root.after(
                 0,
-                lambda: self.progress.config(maximum=total_pages)
+                lambda: self.progress.config(maximum=total_steps),
             )
 
-            for page_index in range(len(doc1)):
-                hashes, image = self.render_single_page(doc1, page_index)
+            for pdf_index, doc in enumerate(docs):
+                for page_index in range(len(doc)):
+                    if self.cancel_event.is_set():
+                        self.finish_cancelled()
+                        return
 
-                self.pdf1_grid_hashes.append(hashes)
-                self.pdf1_images.append(image)
+                    hashes, image = self.render_single_page(doc, page_index)
 
-                processed_pages += 1
-                self.update_progress(
-                    processed_pages,
-                    total_pages,
-                    f"Обробка PDF 1: сторінка "
-                    f"{page_index + 1}/{len(doc1)}"
-                )
+                    if self.cancel_event.is_set():
+                        self.finish_cancelled()
+                        return
 
-            for page_index in range(len(doc2)):
-                hashes, image = self.render_single_page(doc2, page_index)
+                    self.pdf_grid_hashes[pdf_index].append(hashes)
+                    self.pdf_images[pdf_index].append(image)
 
-                self.pdf2_grid_hashes.append(hashes)
-                self.pdf2_images.append(image)
-
-                processed_pages += 1
-                self.update_progress(
-                    processed_pages,
-                    total_pages,
-                    f"Обробка PDF 2: сторінка "
-                    f"{page_index + 1}/{len(doc2)}"
-                )
+                    processed_steps += 1
+                    self.update_progress(
+                        processed_steps,
+                        total_steps,
+                        f"Обробка PDF {pdf_index + 1}: сторінка "
+                        f"{page_index + 1}/{len(doc)}",
+                    )
 
             results = []
-            max_pages = max(
-                len(self.pdf1_grid_hashes),
-                len(self.pdf2_grid_hashes)
-            )
 
-            for index in range(max_pages):
-                page_number = index + 1
+            for page_index in range(max_pages):
+                if self.cancel_event.is_set():
+                    self.finish_cancelled()
+                    return
 
-                if index >= len(self.pdf1_grid_hashes):
-                    result = self.missing_result(
-                        page_number,
-                        "Відсутня в PDF 1"
-                    )
-
-                elif index >= len(self.pdf2_grid_hashes):
-                    result = self.missing_result(
-                        page_number,
-                        "Відсутня в PDF 2"
-                    )
-
-                else:
-                    distances = self.compare_grid_hashes(
-                        self.pdf1_grid_hashes[index],
-                        self.pdf2_grid_hashes[index]
-                    )
-
-                    changed_blocks = [
-                        block
-                        for block in distances
-                        if block["distance"] > BLOCK_THRESHOLD
-                    ]
-
-                    self.changed_blocks_by_page[index] = changed_blocks
-
-                    changed_count = len(changed_blocks)
-                    max_distance = max(
-                        block["distance"] for block in distances
-                    )
-                    total_distance = sum(
-                        block["distance"] for block in distances
-                    )
-
-                    is_different = changed_count >= MIN_CHANGED_BLOCKS
-
-                    result = {
-                        "page": page_number,
-                        "status": "DIFFERENT" if is_different else "OK",
-                        "changed_blocks": (
-                            f"{changed_count}/{GRID_ROWS * GRID_COLS}"
-                        ),
-                        "max_distance": str(max_distance),
-                        "total_distance": str(total_distance),
-                        "blocks": self.format_changed_blocks(
-                            changed_blocks
-                        ),
-                        "tag": "diff" if is_different else "ok",
-                    }
-
+                result = self.compare_page(page_index)
                 results.append(result)
 
+                processed_steps += 1
+                self.update_progress(
+                    processed_steps,
+                    total_steps,
+                    f"Порівняння: сторінка {page_index + 1}/{max_pages}",
+                )
+
+            if self.cancel_event.is_set():
+                self.finish_cancelled()
+                return
+
             self.root.after(0, lambda: self.fill_table(results))
-            self.root.after(
-                0,
-                lambda: self.status_label.config(text="Готово")
-            )
+            self.root.after(0, lambda: self.status_label.config(text="Готово"))
+            self.root.after(0, lambda: self.set_comparing_state(False))
 
         except Exception as exc:
             error_text = str(exc)
@@ -437,21 +430,93 @@ class PdfGridHashComparatorApp:
                 0,
                 lambda: messagebox.showerror(
                     "Помилка",
-                    f"Не вдалося обробити PDF:\n{error_text}"
-                )
+                    f"Не вдалося обробити PDF:\n{error_text}",
+                ),
             )
-            self.root.after(
-                0,
-                lambda: self.status_label.config(text="Помилка")
-            )
+            self.root.after(0, lambda: self.status_label.config(text="Помилка"))
+            self.root.after(0, lambda: self.set_comparing_state(False))
 
         finally:
-            if doc1 is not None:
-                doc1.close()
-            if doc2 is not None:
-                doc2.close()
+            for doc in docs:
+                if doc is not None:
+                    doc.close()
+
+    def finish_cancelled(self):
+        self.root.after(0, lambda: self.status_label.config(text="Скасовано"))
+        self.root.after(0, lambda: self.set_comparing_state(False))
+
+    def compare_page(self, page_index):
+        page_number = page_index + 1
+        available = [
+            page_index < len(self.pdf_grid_hashes[pdf_index])
+            for pdf_index in range(PDF_COUNT)
+        ]
+
+        if not all(available):
+            missing = [
+                f"PDF {index + 1}"
+                for index, exists in enumerate(available)
+                if not exists
+            ]
+            return self.missing_result(
+                page_number,
+                "Відсутня в " + ", ".join(missing),
+            )
+
+        pair_definitions = ((0, 1), (0, 2), (1, 2))
+        pair_distances = {}
+
+        for first, second in pair_definitions:
+            pair_name = f"{first + 1}↔{second + 1}"
+            pair_distances[pair_name] = self.compare_grid_hashes(
+                self.pdf_grid_hashes[first][page_index],
+                self.pdf_grid_hashes[second][page_index],
+            )
+
+        combined_blocks = []
+        block_count = GRID_ROWS * GRID_COLS
+
+        for block_index in range(block_count):
+            sample = pair_distances["1↔2"][block_index]
+            distances = {
+                pair_name: blocks[block_index]["distance"]
+                for pair_name, blocks in pair_distances.items()
+            }
+            max_distance = max(distances.values())
+
+            if max_distance > BLOCK_THRESHOLD:
+                combined_blocks.append({
+                    "row": sample["row"],
+                    "col": sample["col"],
+                    "distance": max_distance,
+                    "pair_distances": distances,
+                })
+
+        self.changed_blocks_by_page[page_index] = combined_blocks
+
+        changed_count = len(combined_blocks)
+        all_distances = [
+            block["distance"]
+            for blocks in pair_distances.values()
+            for block in blocks
+        ]
+
+        max_distance = max(all_distances) if all_distances else 0
+        total_distance = sum(all_distances)
+        is_different = changed_count >= MIN_CHANGED_BLOCKS
+
+        return {
+            "page": page_number,
+            "status": "DIFFERENT" if is_different else "OK",
+            "changed_blocks": f"{changed_count}/{block_count}",
+            "max_distance": str(max_distance),
+            "total_distance": str(total_distance),
+            "blocks": self.format_changed_blocks(combined_blocks),
+            "tag": "diff" if is_different else "ok",
+        }
 
     def missing_result(self, page_number, status):
+        self.changed_blocks_by_page[page_number - 1] = []
         return {
             "page": page_number,
             "status": status,
@@ -467,7 +532,7 @@ class PdfGridHashComparatorApp:
 
         pix = page.get_pixmap(
             matrix=fitz.Matrix(RENDER_SCALE, RENDER_SCALE),
-            alpha=False
+            alpha=False,
         )
 
         image = Image.open(
@@ -476,7 +541,7 @@ class PdfGridHashComparatorApp:
 
         hash_image = image.resize(
             HASH_IMAGE_SIZE,
-            Image.Resampling.LANCZOS
+            Image.Resampling.LANCZOS,
         )
 
         return self.calculate_grid_hashes(hash_image), image
@@ -517,11 +582,18 @@ class PdfGridHashComparatorApp:
         if not changed_blocks:
             return "немає"
 
-        return ", ".join(
-            f"R{block['row'] + 1}C{block['col'] + 1}"
-            f"={block['distance']}"
-            for block in changed_blocks
-        )
+        parts = []
+        for block in changed_blocks:
+            pairs = ", ".join(
+                f"{pair}={distance}"
+                for pair, distance in block["pair_distances"].items()
+            )
+            parts.append(
+                f"R{block['row'] + 1}C{block['col'] + 1} "
+                f"(max={block['distance']}; {pairs})"
+            )
+
+        return "; ".join(parts)
 
     def fill_table(self, results):
         self.results = results
@@ -538,7 +610,7 @@ class PdfGridHashComparatorApp:
                     result["total_distance"],
                     result["blocks"],
                 ),
-                tags=(result["tag"],)
+                tags=(result["tag"],),
             )
 
     def clear_table(self):
@@ -547,14 +619,11 @@ class PdfGridHashComparatorApp:
 
         self.current_page_index = None
 
-        self.canvas1.itemconfig(self.canvas1_image_id, image="")
-        self.canvas2.itemconfig(self.canvas2_image_id, image="")
+        for index, canvas in enumerate(self.canvases):
+            canvas.itemconfig(self.canvas_image_ids[index], image="")
+            canvas.configure(scrollregion=(0, 0, 0, 0))
 
-        self.canvas1.configure(scrollregion=(0, 0, 0, 0))
-        self.canvas2.configure(scrollregion=(0, 0, 0, 0))
-
-        self.preview_img1 = None
-        self.preview_img2 = None
+        self.preview_imgs = [None] * PDF_COUNT
 
     def on_row_select(self, _event):
         selected = self.tree.selection()
@@ -569,97 +638,64 @@ class PdfGridHashComparatorApp:
         self.show_preview(self.current_page_index)
 
     def show_preview(self, page_index):
-        changed_blocks = self.changed_blocks_by_page.get(
-            page_index,
-            []
-        )
+        changed_blocks = self.changed_blocks_by_page.get(page_index, [])
 
-        if (
-            page_index < len(self.pdf1_images)
-            and page_index < len(self.pdf2_images)
-            and self.pdf1_images[page_index] is not None
-            and self.pdf2_images[page_index] is not None
-        ):
-            image1, image2 = self.normalize_preview_pair(
-                self.pdf1_images[page_index],
-                self.pdf2_images[page_index]
-            )
-        else:
-            image1 = (
-                self.pdf1_images[page_index]
-                if page_index < len(self.pdf1_images)
-                else None
+        images = [
+            self.pdf_images[index][page_index]
+            if page_index < len(self.pdf_images[index])
+            else None
+            for index in range(PDF_COUNT)
+        ]
+
+        images = self.normalize_preview_images(images)
+
+        for side, image in enumerate(images):
+            self.render_canvas_side(
+                side=side,
+                image=image,
+                changed_blocks=changed_blocks,
             )
 
-            image2 = (
-                self.pdf2_images[page_index]
-                if page_index < len(self.pdf2_images)
-                else None
-            )
-
-        self.render_canvas_side(
-            side=1,
-            image=image1,
-            changed_blocks=changed_blocks
-        )
-
-        self.render_canvas_side(
-            side=2,
-            image=image2,
-            changed_blocks=changed_blocks
-        )
-
-    def render_canvas_side(
-        self,
-        side,
-        image,
-        changed_blocks
-    ):
-        canvas = self.canvas1 if side == 1 else self.canvas2
-        image_id = (
-            self.canvas1_image_id
-            if side == 1
-            else self.canvas2_image_id
-        )
+    def render_canvas_side(self, side, image, changed_blocks):
+        canvas = self.canvases[side]
+        image_id = self.canvas_image_ids[side]
 
         if image is None:
             canvas.itemconfig(image_id, image="")
             canvas.configure(scrollregion=(0, 0, 0, 0))
+            self.preview_imgs[side] = None
             return
 
         if self.show_grid.get():
-            image = self.draw_grid_and_changes(
-                image,
-                changed_blocks
-            )
+            image = self.draw_grid_and_changes(image, changed_blocks)
 
         width = max(1, round(image.width * self.zoom_factor))
         height = max(1, round(image.height * self.zoom_factor))
 
         scaled = image.resize(
             (width, height),
-            Image.Resampling.LANCZOS
+            Image.Resampling.LANCZOS,
         )
 
         photo = ImageTk.PhotoImage(scaled)
-
-        if side == 1:
-            self.preview_img1 = photo
-        else:
-            self.preview_img2 = photo
+        self.preview_imgs[side] = photo
 
         canvas.itemconfig(image_id, image=photo)
         canvas.coords(image_id, 0, 0)
         canvas.configure(scrollregion=(0, 0, width, height))
 
-    def normalize_preview_pair(self, image1, image2):
-        target_height = max(image1.height, image2.height)
+    def normalize_preview_images(self, images):
+        existing = [image for image in images if image is not None]
+        if not existing:
+            return images
 
-        image1 = self.resize_by_height(image1, target_height)
-        image2 = self.resize_by_height(image2, target_height)
-
-        return image1, image2
-
+        target_height = max(image.height for image in existing)
+        return [
+            self.resize_by_height(image, target_height)
+            if image is not None
+            else None
+            for image in images
+        ]
 
     def resize_by_height(self, image, target_height):
         ratio = target_height / image.height
@@ -667,7 +703,7 @@ class PdfGridHashComparatorApp:
 
         return image.resize(
             (target_width, target_height),
-            Image.Resampling.LANCZOS
+            Image.Resampling.LANCZOS,
         )
 
     def draw_grid_and_changes(self, image, changed_blocks):
@@ -685,7 +721,7 @@ class PdfGridHashComparatorApp:
             draw.line(
                 [(0, y), (width, y)],
                 fill=(80, 80, 80),
-                width=2
+                width=2,
             )
 
         for col in range(1, GRID_COLS):
@@ -693,7 +729,7 @@ class PdfGridHashComparatorApp:
             draw.line(
                 [(x, 0), (x, height)],
                 fill=(80, 80, 80),
-                width=2
+                width=2,
             )
 
         for (row, col), distance in changed.items():
@@ -705,7 +741,7 @@ class PdfGridHashComparatorApp:
             draw.rectangle(
                 [(left, top), (right - 1, bottom - 1)],
                 outline=(255, 0, 0),
-                width=8
+                width=8,
             )
 
             label = f"R{row + 1}C{col + 1}: {distance}"
@@ -713,14 +749,14 @@ class PdfGridHashComparatorApp:
             draw.rectangle(
                 [
                     (left + 5, top + 5),
-                    (left + 190, top + 40)
+                    (left + 190, top + 40),
                 ],
-                fill=(255, 255, 255)
+                fill=(255, 255, 255),
             )
             draw.text(
                 (left + 10, top + 10),
                 label,
-                fill=(255, 0, 0)
+                fill=(255, 0, 0),
             )
 
         return marked
@@ -749,61 +785,56 @@ class PdfGridHashComparatorApp:
 
         self.root.after(
             10,
-            lambda: self.restore_scroll_positions(positions)
+            lambda: self.restore_scroll_positions(positions),
         )
 
     def get_scroll_positions(self):
-        return {
-            "x1": self.canvas1.xview()[0],
-            "y1": self.canvas1.yview()[0],
-            "x2": self.canvas2.xview()[0],
-            "y2": self.canvas2.yview()[0],
-        }
+        return [
+            (canvas.xview()[0], canvas.yview()[0])
+            for canvas in self.canvases
+        ]
 
     def restore_scroll_positions(self, positions):
-        self.canvas1.xview_moveto(positions["x1"])
-        self.canvas1.yview_moveto(positions["y1"])
-        self.canvas2.xview_moveto(positions["x2"])
-        self.canvas2.yview_moveto(positions["y2"])
+        for canvas, (x_pos, y_pos) in zip(self.canvases, positions):
+            canvas.xview_moveto(x_pos)
+            canvas.yview_moveto(y_pos)
 
     def fit_page(self):
         image = self.get_reference_image()
 
-        if image is None:
+        if image is None or not self.canvases:
             return
 
         self.root.update_idletasks()
 
-        available_width = max(1, self.canvas1.winfo_width() - 20)
-        available_height = max(1, self.canvas1.winfo_height() - 20)
+        available_width = max(1, self.canvases[0].winfo_width() - 20)
+        available_height = max(1, self.canvases[0].winfo_height() - 20)
 
         self.set_zoom(
             min(
                 available_width / image.width,
-                available_height / image.height
+                available_height / image.height,
             )
         )
 
     def fit_width(self):
         image = self.get_reference_image()
 
-        if image is None:
+        if image is None or not self.canvases:
             return
 
         self.root.update_idletasks()
 
-        available_width = max(1, self.canvas1.winfo_width() - 20)
+        available_width = max(1, self.canvases[0].winfo_width() - 20)
         self.set_zoom(available_width / image.width)
 
     def get_reference_image(self):
         if self.current_page_index is None:
             return None
 
-        if self.current_page_index < len(self.pdf1_images):
-            return self.pdf1_images[self.current_page_index]
-
-        if self.current_page_index < len(self.pdf2_images):
-            return self.pdf2_images[self.current_page_index]
+        for images in self.pdf_images:
+            if self.current_page_index < len(images):
+                return images[self.current_page_index]
 
         return None
 
@@ -827,7 +858,7 @@ class PdfGridHashComparatorApp:
         self._drag_start[side] = (event.x, event.y)
 
     def drag_canvas(self, side, event):
-        canvas = self.canvas1 if side == 1 else self.canvas2
+        canvas = self.canvases[side]
 
         if side not in self._drag_start:
             return
@@ -842,34 +873,38 @@ class PdfGridHashComparatorApp:
         self._drag_start[side] = (event.x, event.y)
 
         if self.sync_scroll.get():
-            self.sync_other_canvas(side)
+            self.sync_other_canvases(side)
 
     def scroll_x(self, side, *args):
-        canvas = self.canvas1 if side == 1 else self.canvas2
+        canvas = self.canvases[side]
         canvas.xview(*args)
 
         if self.sync_scroll.get():
-            self.sync_other_canvas(side)
+            self.sync_other_canvases(side)
 
     def scroll_y(self, side, *args):
-        canvas = self.canvas1 if side == 1 else self.canvas2
+        canvas = self.canvases[side]
         canvas.yview(*args)
 
         if self.sync_scroll.get():
-            self.sync_other_canvas(side)
+            self.sync_other_canvases(side)
 
-    def sync_other_canvas(self, source_side):
+    def sync_other_canvases(self, source_side):
         if self._syncing_scroll:
             return
 
         self._syncing_scroll = True
 
         try:
-            source = self.canvas1 if source_side == 1 else self.canvas2
-            target = self.canvas2 if source_side == 1 else self.canvas1
+            source = self.canvases[source_side]
+            x_pos = source.xview()[0]
+            y_pos = source.yview()[0]
 
-            target.xview_moveto(source.xview()[0])
-            target.yview_moveto(source.yview()[0])
+            for index, target in enumerate(self.canvases):
+                if index == source_side:
+                    continue
+                target.xview_moveto(x_pos)
+                target.yview_moveto(y_pos)
 
         finally:
             self._syncing_scroll = False
