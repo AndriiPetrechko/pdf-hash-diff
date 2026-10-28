@@ -72,10 +72,8 @@ pip install -r requirements.txt
 ## Запуск програми
 
 ```bash
-python pdf-diff-modes.py
+python pdf-diff.py
 ```
-
-Якщо ви перейменували файл скрипту на `pdf-diff.py`, використовуйте відповідну назву в команді.
 
 ## Використання
 
