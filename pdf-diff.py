@@ -22,17 +22,19 @@ MIN_ZOOM = 0.25
 MAX_ZOOM = 4.0
 ZOOM_STEP = 0.25
 
-PDF_COUNT = 3
+PDF_COUNT = 3  # Максимальна кількість панелей
 
 class PdfGridHashComparatorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("PDF diff v0.4")
+        self.root.title("PDF diff v0.5")
         self.root.geometry("1750x950")
 
-        self.pdf_paths = [None] * PDF_COUNT
-        self.pdf_images = [[] for _ in range(PDF_COUNT)]
-        self.pdf_grid_hashes = [[] for _ in range(PDF_COUNT)]
+        self.pdf_count = 3
+        self.mode_var = tk.IntVar(value=3)
+        self.pdf_paths = [None] * self.pdf_count
+        self.pdf_images = [[] for _ in range(self.pdf_count)]
+        self.pdf_grid_hashes = [[] for _ in range(self.pdf_count)]
 
         self.changed_blocks_by_page = {}
         self.results = []
@@ -43,7 +45,7 @@ class PdfGridHashComparatorApp:
         self.show_grid = tk.BooleanVar(value=True)
         self.sync_scroll = tk.BooleanVar(value=True)
 
-        self.preview_imgs = [None] * PDF_COUNT
+        self.preview_imgs = [None] * self.pdf_count
         self.canvases = []
         self.canvas_image_ids = []
 
@@ -62,10 +64,19 @@ class PdfGridHashComparatorApp:
         self.build_view_controls()
         self.build_results_table()
         self.build_preview_area()
+        self.change_mode()
 
     def build_top_bar(self):
         frame = tk.Frame(self.root)
         frame.pack(fill="x", padx=10, pady=(10, 5))
+
+        tk.Label(frame, text="Режим:").pack(side="left", padx=(5, 3))
+        self.mode_selector = ttk.Combobox(
+            frame, textvariable=self.mode_var, values=(2, 3),
+            state="readonly", width=4,
+        )
+        self.mode_selector.pack(side="left", padx=(0, 10))
+        self.mode_selector.bind("<<ComboboxSelected>>", self.change_mode)
 
         self.select_button = tk.Button(
             frame,
@@ -232,6 +243,7 @@ class PdfGridHashComparatorApp:
         frame = tk.Frame(self.root)
         frame.pack(fill="both", expand=True, padx=10, pady=(5, 10))
 
+        self.preview_panels = []
         for index in range(PDF_COUNT):
             panel = tk.LabelFrame(frame, text=f"PDF {index + 1}")
             panel.pack(
@@ -241,6 +253,7 @@ class PdfGridHashComparatorApp:
                 padx=(0 if index == 0 else 5, 0 if index == PDF_COUNT - 1 else 5),
             )
 
+            self.preview_panels.append(panel)
             canvas, image_id = self.create_canvas(panel, index)
             self.canvases.append(canvas)
             self.canvas_image_ids.append(image_id)
@@ -290,19 +303,44 @@ class PdfGridHashComparatorApp:
 
         return canvas, image_id
 
+    def change_mode(self, _event=None):
+        if self.is_comparing:
+            return
+        self.pdf_count = int(self.mode_var.get())
+        self.pdf_paths = [None] * self.pdf_count
+        self.pdf_images = [[] for _ in range(self.pdf_count)]
+        self.pdf_grid_hashes = [[] for _ in range(self.pdf_count)]
+        self.changed_blocks_by_page = {}
+        self.clear_table()
+        self.progress["value"] = 0
+        self.status_label.config(text="Готово")
+        self.select_button.config(text=f"Вибрати PDF ({self.pdf_count} файли)")
+        for index, label in enumerate(self.pdf_labels):
+            if index < self.pdf_count:
+                label.config(text=f"PDF {index + 1}: не вибрано")
+                label.pack(side="left", fill="x", expand=True, padx=8)
+            else:
+                label.pack_forget()
+        for index, panel in enumerate(self.preview_panels):
+            if index < self.pdf_count:
+                panel.pack(side="left", fill="both", expand=True, padx=5)
+            else:
+                panel.pack_forget()
+        self.preview_imgs = [None] * self.pdf_count
+
     def select_pdfs(self):
         paths = filedialog.askopenfilenames(
-            title="Вибрати рівно 3 PDF",
+            title=f"Вибрати рівно {self.pdf_count} PDF",
             filetypes=[("PDF files", "*.pdf")],
         )
 
         if not paths:
             return
 
-        if len(paths) != PDF_COUNT:
+        if len(paths) != self.pdf_count:
             messagebox.showwarning(
                 "Помилка",
-                "Потрібно вибрати рівно три PDF файли за один раз.",
+                f"Потрібно вибрати рівно {self.pdf_count} PDF файли за один раз.",
             )
             return
 
@@ -317,7 +355,7 @@ class PdfGridHashComparatorApp:
         if any(not path for path in self.pdf_paths):
             messagebox.showwarning(
                 "Помилка",
-                "Спочатку вибери три PDF файли.",
+                f"Спочатку вибери {self.pdf_count} PDF файли.",
             )
             return
 
@@ -348,11 +386,12 @@ class PdfGridHashComparatorApp:
     def set_comparing_state(self, comparing):
         self.is_comparing = comparing
         self.select_button.config(state="disabled" if comparing else "normal")
+        self.mode_selector.config(state="disabled" if comparing else "readonly")
         self.compare_button.config(state="disabled" if comparing else "normal")
         self.cancel_button.config(state="normal" if comparing else "disabled")
 
     def compare_worker(self):
-        docs = [None] * PDF_COUNT
+        docs = [None] * self.pdf_count
 
         try:
             for index, path in enumerate(self.pdf_paths):
@@ -366,8 +405,8 @@ class PdfGridHashComparatorApp:
             total_steps = total_render_pages + max_pages
             processed_steps = 0
 
-            self.pdf_images = [[] for _ in range(PDF_COUNT)]
-            self.pdf_grid_hashes = [[] for _ in range(PDF_COUNT)]
+            self.pdf_images = [[] for _ in range(self.pdf_count)]
+            self.pdf_grid_hashes = [[] for _ in range(self.pdf_count)]
             self.changed_blocks_by_page = {}
 
             self.root.after(
@@ -449,7 +488,7 @@ class PdfGridHashComparatorApp:
         page_number = page_index + 1
         available = [
             page_index < len(self.pdf_grid_hashes[pdf_index])
-            for pdf_index in range(PDF_COUNT)
+            for pdf_index in range(self.pdf_count)
         ]
 
         if not all(available):
@@ -463,7 +502,7 @@ class PdfGridHashComparatorApp:
                 "Відсутня в " + ", ".join(missing),
             )
 
-        pair_definitions = ((0, 1), (0, 2), (1, 2))
+        pair_definitions = ((0, 1),) if self.pdf_count == 2 else ((0, 1), (0, 2), (1, 2))
         pair_distances = {}
 
         for first, second in pair_definitions:
@@ -623,7 +662,7 @@ class PdfGridHashComparatorApp:
             canvas.itemconfig(self.canvas_image_ids[index], image="")
             canvas.configure(scrollregion=(0, 0, 0, 0))
 
-        self.preview_imgs = [None] * PDF_COUNT
+        self.preview_imgs = [None] * self.pdf_count
 
     def on_row_select(self, _event):
         selected = self.tree.selection()
@@ -644,7 +683,7 @@ class PdfGridHashComparatorApp:
             self.pdf_images[index][page_index]
             if page_index < len(self.pdf_images[index])
             else None
-            for index in range(PDF_COUNT)
+            for index in range(self.pdf_count)
         ]
 
         images = self.normalize_preview_images(images)
