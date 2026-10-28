@@ -27,7 +27,7 @@ PDF_COUNT = 3  # Максимальна кількість панелей
 class PdfGridHashComparatorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("PDF diff v0.5")
+        self.root.title("PDF diff v0.5.0")
         self.root.geometry("1750x950")
 
         self.pdf_count = 3

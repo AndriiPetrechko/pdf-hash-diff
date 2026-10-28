@@ -1,6 +1,6 @@
 # PDF Hash Comparator
 
-## Release v0.5
+## Release v0.5.0
 
 Графічна програма на Python для візуального порівняння **двох або трьох PDF-файлів** сторінка за сторінкою за допомогою perceptual hash (pHash).
 
